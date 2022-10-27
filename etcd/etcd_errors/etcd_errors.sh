@@ -7,7 +7,7 @@ do
         echo -e "RESOURCES
         https://access.redhat.com/solutions/4865321
         https://etcd.io/docs/v3.5/faq/#what-does-the-etcd-warning-failed-to-send-out-heartbeat-on-time-mean \n"
-        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'failed to send out heartbeat on time'| cut -c -16 | uniq -c; done
+        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'failed to send out heartbeat on time'| cut -c -10 | uniq -c; done
         echo -e "\n"
         break
     else 
@@ -21,7 +21,7 @@ do
     if [ $(omc logs $POD -c etcd -n openshift-etcd| grep "server is likely overloaded" | wc -l) -gt 0 ]
     then
         echo -e "\e[1;31mETCD IS LIKELY OVERLOADED\e[1;m \netcd heartbeat messages are followed by server is likely overloaded"
-        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep "server is likely overloaded"| cut -c -16 | uniq -c; done
+        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep "server is likely overloaded"| cut -c -10 | uniq -c; done
         echo -e "\n"
         break
     else 
@@ -37,7 +37,7 @@ do
         echo -e "\e[1;31mETCD WARNING APPLY ENTRIES TOOK TOO LONG\e[1;m \nAs per required by its consensus protocol implementation, after a majority of etcd members agree to commit a request, each etcd server applies the request to its data store and persists the result to disk. If the average request duration exceeds 100 milliseconds, etcd will warn entries request took too long"
         echo -e "RESOURCES
         https://etcd.io/docs/v3.5/faq/#what-does-the-etcd-warning-apply-entries-took-too-long-mean \n"
-        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'took too long'| cut -c -16 | uniq -c; done
+        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'took too long'| cut -c -10 | uniq -c; done
         echo -e "\n"
         break
     else 
@@ -52,9 +52,9 @@ do
     then
         echo -e "\e[1;31mETCD CLOCK DIFFERENCE\e[1;m\nAs per required by its consensus protocol implementation, after a majority of etcd members agree to commit a request, each etcd server applies the request to its data store and persists the result to disk. If the average request duration exceeds 100 milliseconds, etcd will warn entries request took too long"
         echo -e "RESOURCES
-        https://access.redhat.com/solutions/6371621
+        https://access.redhat.com/solutions/6371021
         https://docs.openshift.com/container-platform/4.6/installing/install_config/installing-customizing.html?extIdCarryOver=true&sc_cid=701f2000001Css5AAC#installation-special-config-chrony_installing-customizing \n"
-        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'clock difference'| cut -c -16 | uniq -c; done
+        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'clock difference'| cut -c -10 | uniq -c; done
         echo -e "\n"
     else 
         echo -e "\e[1;32mETCD CLOCK IS OK\e[1;m \n"
@@ -71,7 +71,7 @@ do
         Starting in RHOCP 4.9.z, defragmentation occurs automatically."
         echo -e "RESOURCES
         https://etcd.io/docs/v3.5/faq/#what-does-mvcc-database-space-exceeded-mean-and-how-do-i-fix-it \n"
-        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'database space exceeded'| cut -c -16 | uniq -c; done
+        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'database space exceeded'| cut -c -10 | uniq -c; done
         echo -e "\n"
     else 
         echo -e "\e[1;32mETCD DATABASE SPACE HAS NOT EXCEEDED\e[1;m \n"
@@ -87,8 +87,9 @@ do
         During the leader election the cluster cannot process any writes. Write requests sent during the election are queued for processing until a new leader is elected. Until a new leader is elected, we are going to observe instabilities, slow response times and unexpected behaviors affecting RHOCP control plane."
         echo -e "RESOURCES
         https://etcd.io/docs/v3.5/op-guide/failures/#leader-failure \n"
-        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'leader changed'| cut -c -16 | uniq -c; done
+        omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep 'leader changed'| cut -c -10 | uniq -c; done
         echo -e "\n"
+        break
     else 
         echo -e "\e[1;32mETCD HAS NO LEADERSHIP CHANGES OR FAILURES\e[1;m \n"
         break
