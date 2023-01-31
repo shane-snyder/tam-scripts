@@ -1,5 +1,43 @@
 #!/bin/bash
 #set -x
+
+#SET DEFAULT ERROR OCCURANCE COUNT TO BY DAY
+TIME=10
+#SELECT TIMEFRAME TO DISPLAY ETCD ERROR OCCURANCE COUNT
+PARAMS=""
+while (( "$#" )); do
+  case "$1" in
+    -M|--month)
+      TIME=7
+      shift
+      ;;
+    -d|--day)
+      TIME=10
+      shift
+      ;;
+    -h|--hour)
+      TIME=13
+      shift
+      ;;
+    -m|--minute)
+      TIME=16
+      shift
+      ;;
+    -*|--*=) # unsupported flags
+      echo "Error: Unsupported flag $1" >&2
+      exit 1
+      ;;
+    *) # preserve positional arguments
+      PARAMS="$PARAMS $1"
+      shift
+      ;;
+  esac
+done
+
+# set positional arguments in their proper place
+eval set -- "$PARAMS"
+
+
 failed_to_send_out_heartbeat_on_time(){
 echo -e "\e[1;31mETCD HEARTBEAT\e[1;m \nAs etcd uses a leader-based consensus protocol for consistent data replication and log execution, it relies in a heartbeat mechnism to keep the cluster members in a healthy state. \n"
             echo -e "RESOURCES
@@ -51,7 +89,7 @@ do
         then
             function=${etcd_errors[$i]// /_}
             ${function}
-            omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep "${etcd_errors[$i]}"| cut -c -7 | uniq -c; done
+            omc get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && omc logs $POD -c etcd -n openshift-etcd| grep "${etcd_errors[$i]}"| cut -c -$TIME | uniq -c; done
             echo -e "\n"
             break
         else 
@@ -61,4 +99,3 @@ do
         fi
     done
 done
-
