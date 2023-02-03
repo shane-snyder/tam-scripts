@@ -34,6 +34,33 @@ while (( "$#" )); do
   esac
 done
 
+
+check_omc(){
+
+if [ ! $(command -v omc) ]; then
+  echo "Openshift must-gather client not found. Please install omc."
+  echo "https://github.com/gmeghnag/omc"
+  exit 1
+  else
+  #current_mg=`omc use | head -1`
+  current_mg=`cat ~/.omc/omc.json | jq -r '.contexts[] | select (.current=="*") | .path'`
+  echo "Enter full path to must-gather you'd like to use or press enter to use current must-gather Current must-gather: "$current_mg
+  read line
+  if [ ! $line ]; then
+    echo "Using current must-gather"
+    else
+    omc use ${line}
+    updated_mg=`cat ~/.omc/omc.json | jq -r '.contexts[] | select (.current=="*") | .path'`
+        if [ "$current_mg" == "$updated_mg" ]; then
+        echo "Must-gather was not switched. Please ensure you're using the full path"
+        exit 1;
+        else
+        echo "Must-gather switched to $line"
+        omc use
+        fi
+    fi
+fi
+}
 # set positional arguments in their proper place
 eval set -- "$PARAMS"
 
@@ -79,7 +106,7 @@ echo -e "\e[1;31mETCD LEADERSHIP CHANGES AND FAILURES\e[1;m\nLeadership changes 
         https://etcd.io/docs/v3.5/op-guide/failures/#leader-failure \n"
         
 }
-
+check_omc
 etcd_errors=("failed to send out heartbeat on time" "server is likely overloaded" "took too long" "clock difference" "database space exceeded" "leader changed")
 etcd_recomendations=(heartbeat)
 for i in "${!etcd_errors[@]}"
