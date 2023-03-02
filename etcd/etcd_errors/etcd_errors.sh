@@ -1,9 +1,26 @@
 #!/bin/bash
 #set -x
 
+#OPTIONS
+get_help(){
+cat  <<HELP
+Options:
+  -oc, --oc:      Directs script to run on an OpenShift cluster
+  -M, --month:    Displays error occurances by month
+  -d, --day:      Displays error occurances by day
+  -H, --hour:     Displays error occurances by hour
+  -m, --minute:   Displays error occurances by minute
+  -h, --help:     Displays options
+
+HELP
+}
+
 #SET DEFAULT ERROR OCCURANCE COUNT TO BY DAY
 TIME=10
+
+#SET DEFAULT CLIENT TO OMC
 CLIENT="omc"
+
 #SELECT TIMEFRAME TO DISPLAY ETCD ERROR OCCURANCE COUNT
 PARAMS=""
 while (( "$#" )); do
@@ -16,7 +33,7 @@ while (( "$#" )); do
       TIME=10
       shift
       ;;
-    -h|--hour)
+    -H|--hour)
       TIME=13
       shift
       ;;
@@ -27,6 +44,11 @@ while (( "$#" )); do
     -oc|--oc)
       CLIENT="oc"
       shift
+      ;;
+    -h|--help)
+      get_help
+      shift
+      exit 0
       ;;
     -*|--*=) # unsupported flags
       echo "Error: Unsupported flag $1" >&2
@@ -70,7 +92,7 @@ if [ $CLIENT = "omc" ]; then
     echo "Download oc"
     exit 1;
     else
-    echo "See if you're logged in here"
+    echo "Logged into" `oc whoami --show-server=true` "as user" `oc whoami`
     fi
 fi
 }

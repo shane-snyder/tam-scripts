@@ -22,8 +22,9 @@ Options:
   -oc, --oc:      Directs script to run on an OpenShift cluster
   -M, --month:    Displays error occurances by month
   -d, --day:      Displays error occurances by day
-  -h, --hour:     Displays error occurances by hour
+  -H, --hour:     Displays error occurances by hour
   -m, --minute:   Displays error occurances by minute
+  -h, --help:     Displays options
 ```
 
 ## Links
