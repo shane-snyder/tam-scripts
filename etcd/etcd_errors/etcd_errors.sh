@@ -17,6 +17,7 @@ HELP
 
 #SET DEFAULT ERROR OCCURANCE COUNT TO BY DAY
 TIME=10
+PLOT_DATE="%Y-%m-%d"
 
 #SET DEFAULT CLIENT TO OMC
 CLIENT="omc"
@@ -99,7 +100,6 @@ fi
 
 eval set -- "$PARAMS"
 
-
 failed_to_send_out_heartbeat_on_time(){
 echo -e "\e[1;31mETCD HEARTBEAT\e[1;m \nAs etcd uses a leader-based consensus protocol for consistent data replication and log execution, it relies in a heartbeat mechnism to keep the cluster members in a healthy state. \n"
             echo -e "RESOURCES
@@ -151,7 +151,27 @@ do
         then
             function=${etcd_errors[$i]// /_}
             ${function}
-            $CLIENT get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD && $CLIENT logs $POD -c etcd -n openshift-etcd| grep "${etcd_errors[$i]}"| cut -c -$TIME | uniq -c; done
+            $CLIENT get pods -n openshift-etcd|grep etcd|grep -v quorum|while read POD line; do echo $POD
+            $CLIENT logs $POD -c etcd -n openshift-etcd| grep "${etcd_errors[$i]}"| cut -c -$TIME | uniq -c
+
+            # Run gnuplot only if the function is "took_too_long"
+                if [ "$function" == "took_too_long" ]; then
+                $CLIENT logs $POD -c etcd -n openshift-etcd| grep "${etcd_errors[$i]}"| cut -c -10 | uniq -c > plot.txt
+                    gnuplot << EOF
+                    set xdata time
+                    set timefmt "${PLOT_DATE}"
+                    set format x "%Y-%m-%d"
+                    set xlabel "Date"
+                    set ylabel "Number of Occurrences"
+                    set grid
+                    set title "Occurrences vs. Date"
+                    set terminal pngcairo size 1800,600 enhanced font 'Verdana,10'
+                    set output "${POD}.png"
+                    plot "plot.txt" using 2:1 with linespoints title "Occurrences"
+EOF
+                rm plot.txt
+                fi
+            done
             echo -e "\n"
             break
         else 
