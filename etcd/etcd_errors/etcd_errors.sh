@@ -199,7 +199,7 @@ do
                          "plot_formatted.txt" using 2:1 with points pt 7 ps 1.2 lc rgb "black" title ""
 EOF
                 rm plot.txt
-                cat plot_formatted.txt
+                rm plot_formatted.txt
                 fi
             done
             echo -e "\n"
