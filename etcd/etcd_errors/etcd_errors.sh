@@ -157,6 +157,34 @@ do
             # Run gnuplot only if the function is "took_too_long"
                 if [ "$function" == "took_too_long" ]; then
                 $CLIENT logs $POD -c etcd -n openshift-etcd| grep "${etcd_errors[$i]}"| cut -c -10 | uniq -c > plot.txt
+                    input_file="plot.txt"
+                    output_file="plot_formatted.txt"
+                    start_date=$(head -n 1 "$input_file" | awk '{print $2}')
+                    end_date=$(tail -n 1 "$input_file" | awk '{print $2}')
+
+                    # Generate a complete list of dates between start_date and end_date
+                    all_dates=()
+                    current_date="$start_date"
+                    while [ "$current_date" != "$end_date" ]; do
+                        all_dates+=("$current_date")
+                        current_date=$(date -I -d "$current_date + 1 day")
+                    done
+                    all_dates+=("$end_date")
+
+                    # Process the input file and output the counts with missing dates filled with 0
+                    declare -A counts
+                    while read -r count date; do
+                        counts["$date"]=$count
+                    done < "$input_file"
+
+                    rm "$output_file" 2>/dev/null
+                    for date in "${all_dates[@]}"; do
+                        if [ -n "${counts["$date"]}" ]; then
+                            echo "${counts["$date"]} $date" >> "$output_file"
+                        else
+                            echo "0 $date" >> "$output_file"
+                        fi
+                    done
                     gnuplot << EOF
                     set xdata time
                     set timefmt "${PLOT_DATE}"
@@ -167,9 +195,11 @@ do
                     set title "Occurrences vs. Date"
                     set terminal pngcairo size 1800,600 enhanced font 'Verdana,10'
                     set output "${POD}.png"
-                    plot "plot.txt" using 2:1 with linespoints title "Occurrences"
+                    plot "plot_formatted.txt" using 2:1 with lines title "Occurrences" lw 2 lc rgb "red", \
+                         "plot_formatted.txt" using 2:1 with points pt 7 ps 1.2 lc rgb "black" title ""
 EOF
                 rm plot.txt
+                cat plot_formatted.txt
                 fi
             done
             echo -e "\n"
