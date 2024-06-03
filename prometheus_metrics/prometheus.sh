@@ -14,6 +14,10 @@ curl -Ls "https://github.com/prometheus/prometheus/releases/download/v${promethe
 mkdir /tmp/prometheus/data
 #mkdir /tmp/prometheus/prometheus-$prometheus_version.$os-$arch/data
 read -p "Enter the path to the Prometheus DB dump: " db_dump_path
-tar -xvf "$db_dump_path" -C /tmp/prometheus/data
+tar -xvf "$db_dump_path" -C /tmp/prometheus
+for file in /tmp/prometheus/metrics/*.gz; do tar -xvzf "$file" -C /tmp/prometheus/data; done
+
+
 echo "Launching prometheus. This could take awhile depending on how large the dump was."
-/tmp/prometheus/prometheus --config.file=/tmp/prometheus/prometheus.yml
+cd /tmp/prometheus
+./prometheus --config.file=/tmp/prometheus/prometheus.yml
