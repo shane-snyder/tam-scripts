@@ -1,0 +1,47 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ubi-sleep-deployment
+  labels:
+    app: ubi-sleep
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ubi-sleep
+  template:
+    metadata:
+      labels:
+        app: ubi-sleep
+    spec:
+      containers:
+      - name: sleep
+        image: registry.access.redhat.com/ubi8/ubi
+        command: ["/bin/bash", "-c", "while true; do sleep 10; done"]
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ubi-sleep-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ubi-sleep-deployment
+  minReplicas: 3
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
