@@ -81,6 +81,17 @@ def get_namespaces_with_quotas():
     # Get unique namespaces that have quotas
     return list(set(item["metadata"]["namespace"] for item in quotas.get("items", [])))
 
+def get_deployment_configs(namespace):
+    """Retrieve all DeploymentConfigs in a given namespace."""
+    result = subprocess.run(
+        ["kubectl", "get", "deploymentconfigs", "-n", namespace, "-o", "json"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:  # Handle clusters where DCs aren't available
+        return []
+    dcs = json.loads(result.stdout)
+    return dcs.get("items", [])
+
 def main(namespace):
     if namespace.lower() == "all":
         namespaces = get_namespaces_with_quotas()
@@ -96,6 +107,7 @@ def main(namespace):
         print(f"{'-'*80}")
         
         deployments = get_deployments(ns)
+        deployment_configs = get_deployment_configs(ns)
         hpas = get_hpa(ns)
         resource_quota = get_resource_quota(ns)
 
@@ -106,18 +118,19 @@ def main(namespace):
         total_cpu_limits = 0
         total_memory_limits = 0
 
-        print("\nDeployment Resource Usage:")
+        print("\nDeployment/DeploymentConfig Resource Usage:")
 
+        # Process Deployments
         for deployment in deployments:
             name = deployment["metadata"]["name"]
             containers = deployment["spec"]["template"]["spec"]["containers"]
-
-            if name not in hpa_map:
-                print(f"  Deployment: {name} has no corresponding HPA")
-                continue
-
-            hpa = hpa_map[name]
-            max_replicas = hpa["spec"].get("maxReplicas", 1)
+            
+            # Use replicas from deployment if no HPA exists
+            if name in hpa_map:
+                max_replicas = hpa_map[name]["spec"].get("maxReplicas", 1)
+            else:
+                max_replicas = deployment["spec"].get("replicas", 1)
+                print(f"  Deployment: {name} has no HPA, using spec.replicas: {max_replicas}")
 
             deployment_cpu_requests = 0
             deployment_memory_requests = 0
@@ -140,6 +153,45 @@ def main(namespace):
             total_memory_limits += deployment_memory_limits
 
             print(f"  Deployment: {name}")
+            print(f"    Max Replicas: {max_replicas}")
+            print(f"    Total CPU Requests: {deployment_cpu_requests}m")
+            print(f"    Total Memory Requests: {deployment_memory_requests}Mi")
+            print(f"    Total CPU Limits: {deployment_cpu_limits}m")
+            print(f"    Total Memory Limits: {deployment_memory_limits}Mi")
+
+        # Process DeploymentConfigs
+        for dc in deployment_configs:
+            name = dc["metadata"]["name"]
+            containers = dc["spec"]["template"]["spec"]["containers"]
+            
+            # Use replicas from DC if no HPA exists
+            if name in hpa_map:
+                max_replicas = hpa_map[name]["spec"].get("maxReplicas", 1)
+            else:
+                max_replicas = dc["spec"].get("replicas", 1)
+                print(f"  DeploymentConfig: {name} has no HPA, using spec.replicas: {max_replicas}")
+
+            deployment_cpu_requests = 0
+            deployment_memory_requests = 0
+            deployment_cpu_limits = 0
+            deployment_memory_limits = 0
+
+            for container in containers:
+                requests = container.get("resources", {}).get("requests", {})
+                limits = container.get("resources", {}).get("limits", {})
+                total_requests, total_limits = calculate_total_resources(requests, limits, max_replicas)
+
+                deployment_cpu_requests += total_requests["cpu"]
+                deployment_memory_requests += total_requests["memory"]
+                deployment_cpu_limits += total_limits["cpu"]
+                deployment_memory_limits += total_limits["memory"]
+
+            total_cpu_requests += deployment_cpu_requests
+            total_memory_requests += deployment_memory_requests
+            total_cpu_limits += deployment_cpu_limits
+            total_memory_limits += deployment_memory_limits
+
+            print(f"  DeploymentConfig: {name}")
             print(f"    Max Replicas: {max_replicas}")
             print(f"    Total CPU Requests: {deployment_cpu_requests}m")
             print(f"    Total Memory Requests: {deployment_memory_requests}Mi")
