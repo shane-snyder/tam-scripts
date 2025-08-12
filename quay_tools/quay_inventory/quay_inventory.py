@@ -4,6 +4,7 @@ import os
 import getpass
 import csv
 from datetime import datetime
+from urllib.parse import quote
 
 # --- Configuration ---
 QUAY_HOSTNAME = os.getenv('QUAY_HOSTNAME')
@@ -73,8 +74,58 @@ def get_repository_logs(repo_name):
     response.raise_for_status()
     return response.json().get('logs', [])
 
+def get_repository_user_permissions(repo_name):
+    """Returns dict[user] = role for direct user permissions on the repository."""
+    url = f"{API_BASE_URL}/repository/{repo_name}/permissions/user/"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Accept": "application/json"}
+    try:
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        perms = data.get('permissions', {})
+        # perms is typically { "username": {"role": "admin" }, ... }
+        return {user: details.get('role') for user, details in perms.items()}
+    except requests.exceptions.RequestException as e:
+        print(f"    Warning: Could not fetch user permissions for {repo_name}: {e}")
+        return {}
+
+def get_repository_team_permissions(repo_name):
+    """Returns dict[team_name] = role for team permissions on the repository."""
+    url = f"{API_BASE_URL}/repository/{repo_name}/permissions/team/"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Accept": "application/json"}
+    try:
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        perms = data.get('permissions', {})
+        # perms is typically { "teamname": {"role": "read" }, ... }
+        return {team: details.get('role') for team, details in perms.items()}
+    except requests.exceptions.RequestException as e:
+        print(f"    Warning: Could not fetch team permissions for {repo_name}: {e}")
+        return {}
+
+def get_team_members(org_name, team_name):
+    """Returns list of usernames for a given team in an org."""
+    url = f"{API_BASE_URL}/organization/{org_name}/team/{quote(team_name, safe='')}/members"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Accept": "application/json"}
+    try:
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        # Response may be { "members": [ { "name": "user1" }, ... ] } or a direct list
+        members = data.get('members', data if isinstance(data, list) else [])
+        users = []
+        for m in members:
+            username = (m.get('name') if isinstance(m, dict) else None) or (m.get('username') if isinstance(m, dict) else None)
+            if username:
+                users.append(username)
+        return users
+    except requests.exceptions.RequestException as e:
+        print(f"    Warning: Could not fetch members for team {org_name}/{team_name}: {e}")
+        return []
+
 def main():
-    """Main function to find repos, list images, and show usage."""
+    """Main function to find repos, list images, show usage, and permissions."""
     print(f"--- Connecting to API Base: {API_BASE_URL} ---\n")
     try:
         namespaces = get_namespaces()
@@ -138,6 +189,33 @@ def main():
                     if pull_activity:
                         pull_history_str = "\n".join([f"User: {user}, Timestamp: {timestamp}" for user, timestamp in pull_activity.items()])
 
+                # Permissions: direct users + users via teams
+                direct_user_perms = get_repository_user_permissions(full_repo_name)  # dict[user]=role
+                team_perms = get_repository_team_permissions(full_repo_name)         # dict[team]=role
+
+                effective_user_sources = {}  # user -> [ "direct:role", "team:TEAM:role", ... ]
+                for user, role in direct_user_perms.items():
+                    if not role:
+                        continue
+                    effective_user_sources.setdefault(user, []).append(f"direct:{role}")
+
+                # Expand team permissions into users (if org namespace)
+                org_name = repo.get('namespace')
+                if org_name and team_perms:
+                    for team, role in team_perms.items():
+                        if not role:
+                            continue
+                        members = get_team_members(org_name, team)
+                        for user in members:
+                            effective_user_sources.setdefault(user, []).append(f"team:{team}:{role}")
+
+                users_with_permissions_str = "None"
+                if effective_user_sources:
+                    parts = []
+                    for user in sorted(effective_user_sources.keys()):
+                        parts.append(f"{user}: {' | '.join(sorted(effective_user_sources[user]))}")
+                    users_with_permissions_str = " ".join(parts)
+
                 inventory_data.append({
                     'Namespace': repo['namespace'],
                     'Repository': repo['name'],
@@ -145,7 +223,8 @@ def main():
                     'Unique Image Count': unique_images_count,
                     'Latest Push Timestamp': latest_push_time_str,
                     'Push History': push_history_str,
-                    'Pull History': pull_history_str
+                    'Pull History': pull_history_str,
+                    'Users with Permissions': users_with_permissions_str
                 })
 
             except requests.exceptions.HTTPError as e:
@@ -156,7 +235,7 @@ def main():
         
         if inventory_data:
             with open(output_filename, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['Namespace', 'Repository', 'Tag Count', 'Unique Image Count', 'Latest Push Timestamp', 'Push History', 'Pull History']
+                fieldnames = ['Namespace', 'Repository', 'Tag Count', 'Unique Image Count', 'Latest Push Timestamp', 'Push History', 'Pull History', 'Users with Permissions']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(inventory_data)
