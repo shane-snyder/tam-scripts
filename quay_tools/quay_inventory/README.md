@@ -23,6 +23,7 @@ Generates a CSV inventory of all Quay repositories across your user namespace an
    - `Administer Repositories`
    - `View all visible repositories`
    - `Read/Write to any accessible repositories`
+   - `Read User Information`
 8. Click **Authorize Application** and copy the generated token
 
 ---
