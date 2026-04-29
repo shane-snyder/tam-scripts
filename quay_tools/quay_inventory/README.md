@@ -56,6 +56,7 @@ The script will generate a file called `quay_repository_inventory.csv` in the cu
 | Flag | Default | Description |
 |---|---|---|
 | `--stale-days DAYS` | `180` | Number of days since last push after which a tag is considered stale |
+| `--resume CSV_FILE` | | Resume from an existing inventory CSV: skip repositories already in the file and append new rows |
 | `-h`, `--help` | | Show help message and exit |
 
 ### Examples
@@ -69,7 +70,31 @@ python3 quay_inventory.py --stale-days 30
 
 # Flag tags that haven't been updated in a year
 python3 quay_inventory.py --stale-days 365
+
+# Resume a previous run that timed out partway through
+python3 quay_inventory.py --resume quay_repository_inventory.csv
 ```
+
+---
+
+## Resuming after a timeout
+
+Large Quay instances sometimes time out partway through an inventory run. To make this recoverable, the script writes each repository's row to the CSV as soon as it is processed (rather than buffering everything until the end). If a run dies, the rows already written are preserved on disk.
+
+To pick up where it left off, re-run with `--resume` pointing at the existing CSV:
+
+```bash
+python3 quay_inventory.py --resume quay_repository_inventory.csv
+```
+
+When `--resume` is used:
+
+- The script reads the existing CSV, builds the set of `(Namespace, Repository)` rows already present, and skips them when iterating.
+- New rows are appended to the same file — the existing data is not rewritten.
+- The header from the existing file is reused. If the original run used a different `--stale-days` value than the one passed on resume, the script keeps the original threshold so the `Stale Tags (>Nd)` column stays consistent and prints a warning.
+- If the path passed to `--resume` does not exist yet, the script falls back to creating a fresh CSV at that path.
+
+You can re-run with `--resume` as many times as needed until the inventory is complete.
 
 ---
 

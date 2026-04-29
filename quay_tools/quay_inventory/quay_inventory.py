@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+import re
 import getpass
 import csv
 import argparse
@@ -16,6 +17,7 @@ examples:
   python3 quay_inventory.py
   python3 quay_inventory.py --stale-days 30
   python3 quay_inventory.py --stale-days 365
+  python3 quay_inventory.py --resume quay_repository_inventory.csv
 
 environment variables:
   QUAY_HOSTNAME   Quay hostname (e.g. quay.example.com) — prompted if not set
@@ -29,8 +31,15 @@ parser.add_argument(
     metavar='DAYS',
     help='Number of days without a push after which a tag is considered stale (default: 180)'
 )
+parser.add_argument(
+    '--resume',
+    type=str,
+    metavar='CSV_FILE',
+    help='Resume from an existing inventory CSV: skip repositories already present and append new rows.'
+)
 args = parser.parse_args()
 STALE_DAYS_THRESHOLD = args.stale_days
+RESUME_FILE = args.resume
 
 # --- Configuration ---
 QUAY_HOSTNAME = os.getenv('QUAY_HOSTNAME')
@@ -173,6 +182,27 @@ def format_size(size_bytes):
         size_bytes /= 1024
     return f"{size_bytes:.1f} PB"
 
+def load_processed_repos(csv_path):
+    """Reads an existing inventory CSV and returns (set of (namespace, repository) keys,
+    fieldnames list, detected stale-days threshold from the header or None)."""
+    processed = set()
+    fieldnames = None
+    detected_stale_days = None
+    with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        for row in reader:
+            ns = row.get('Namespace')
+            name = row.get('Repository')
+            if ns and name:
+                processed.add((ns, name))
+    for fn in fieldnames:
+        m = re.match(r'Stale Tags \(>(\d+)d\)', fn)
+        if m:
+            detected_stale_days = int(m.group(1))
+            break
+    return processed, fieldnames, detected_stale_days
+
 def parse_tag_datetime(raw):
     """Parses a Quay tag last_modified string into a naive UTC datetime."""
     try:
@@ -182,8 +212,42 @@ def parse_tag_datetime(raw):
 
 def main():
     """Main function to find repos, list images, show usage, and permissions."""
+    global STALE_DAYS_THRESHOLD
     print(f"--- Connecting to API Base: {API_BASE_URL} ---\n")
     now = datetime.utcnow()
+
+    output_filename = RESUME_FILE if RESUME_FILE else 'quay_repository_inventory.csv'
+    processed_repos = set()
+    existing_fieldnames = None
+
+    if RESUME_FILE:
+        if not os.path.exists(RESUME_FILE):
+            print(f"--resume file {RESUME_FILE} does not exist; starting a fresh inventory at this path.")
+        else:
+            processed_repos, existing_fieldnames, detected_stale_days = load_processed_repos(RESUME_FILE)
+            print(f"Resuming from {RESUME_FILE}: {len(processed_repos)} repositories already present will be skipped.")
+            if detected_stale_days is not None and detected_stale_days != STALE_DAYS_THRESHOLD:
+                print(
+                    f"  Note: existing CSV header uses --stale-days={detected_stale_days}; "
+                    f"overriding the CLI value ({STALE_DAYS_THRESHOLD}) so the column header stays consistent."
+                )
+                STALE_DAYS_THRESHOLD = detected_stale_days
+
+    fieldnames = existing_fieldnames or [
+        'Namespace', 'Repository', 'Repo Size', 'Tag Count', 'Unique Image Count',
+        f'Stale Tags (>{STALE_DAYS_THRESHOLD}d)', 'Duplicate Tags',
+        'Latest Push Timestamp', 'Tags', 'Push History', 'Pull History',
+        'Users with Permissions'
+    ]
+    file_mode = 'a' if (RESUME_FILE and os.path.exists(RESUME_FILE)) else 'w'
+
+    csvfile = open(output_filename, file_mode, newline='', encoding='utf-8')
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    if file_mode == 'w':
+        writer.writeheader()
+        csvfile.flush()
+    rows_written = 0
+
     try:
         namespaces = get_namespaces()
         all_repositories = []
@@ -196,10 +260,11 @@ def main():
 
         print(f"\nSuccessfully found a total of {len(all_repositories)} repositories.")
 
-        inventory_data = []
-
         for repo in all_repositories:
             full_repo_name = f"{repo['namespace']}/{repo['name']}"
+            if (repo['namespace'], repo['name']) in processed_repos:
+                print(f"Skipping repository (already in CSV): {full_repo_name}")
+                continue
             print(f"Processing repository: {full_repo_name}...")
 
             try:
@@ -305,7 +370,7 @@ def main():
                         parts.append(f"{user}: {' | '.join(sorted(effective_user_sources[user]))}")
                     users_with_permissions_str = " ".join(parts)
 
-                inventory_data.append({
+                writer.writerow({
                     'Namespace': repo['namespace'],
                     'Repository': repo['name'],
                     'Repo Size': format_size(repo_size),
@@ -319,34 +384,25 @@ def main():
                     'Pull History': pull_history_str,
                     'Users with Permissions': users_with_permissions_str
                 })
+                csvfile.flush()
+                rows_written += 1
 
             except requests.exceptions.HTTPError as e:
                 print(f"  ERROR processing repository {full_repo_name}: {e}")
 
-        output_filename = 'quay_repository_inventory.csv'
-        print(f"\nProcessing complete. Writing data to {output_filename}...")
-
-        if inventory_data:
-            with open(output_filename, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = [
-                    'Namespace', 'Repository', 'Repo Size', 'Tag Count', 'Unique Image Count',
-                    f'Stale Tags (>{STALE_DAYS_THRESHOLD}d)', 'Duplicate Tags',
-                    'Latest Push Timestamp', 'Tags', 'Push History', 'Pull History',
-                    'Users with Permissions'
-                ]
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(inventory_data)
-            print("Successfully saved inventory to CSV.")
-        else:
-            print("No repository data found to write to CSV.")
+        print(f"\nProcessing complete. Wrote {rows_written} new row(s) to {output_filename}.")
 
     except requests.exceptions.RequestException as e:
         print(f"An API error occurred: {e}")
+        print(f"Partial progress saved to {output_filename}. Re-run with --resume {output_filename} to continue.")
     except KeyError as e:
         print(f"An unexpected error occurred. Missing key in data: {e}")
+        print(f"Partial progress saved to {output_filename}. Re-run with --resume {output_filename} to continue.")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
+        print(f"Partial progress saved to {output_filename}. Re-run with --resume {output_filename} to continue.")
+    finally:
+        csvfile.close()
 
 if __name__ == "__main__":
     main()
