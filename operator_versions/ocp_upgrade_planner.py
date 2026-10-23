@@ -25,11 +25,12 @@ Usage:
     python ocp_upgrade_planner.py --target 4.22.18
     python ocp_upgrade_planner.py --target 4.22 --html plan.html
     python ocp_upgrade_planner.py --target 4.22 --from 4.20.10
+    python ocp_upgrade_planner.py --target 4.22 --must-gather ./must-gather.local.1234/
     python ocp_upgrade_planner.py --target 4.22 --simulate-operator odf-operator=4.20.5-rhodf --only-simulated
 
 Requirements:
-    - oc CLI authenticated to a cluster
-    - requests Python package (pip install requests)
+    - oc CLI authenticated to a cluster, or a must-gather (--must-gather)
+    - requests (and pyyaml for --must-gather): pip install -r requirements.txt
 """
 
 import argparse
@@ -98,13 +99,20 @@ def vkey(version):
     return tuple(int(n) for n in nums)
 
 
+def _ident_key(parts):
+    return tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in parts.split(".")) if parts else ()
+
+
 def semkey(version):
-    """Semver sort key: prereleases ('4.21.0-2026...', '2.19.0-4') sort before the release."""
-    core, _, pre = version.lstrip("v").split("+")[0].partition("-")
+    """Semver sort key: prereleases ('4.21.0-2026...', '2.19.0-4') sort before the release.
+
+    Build metadata ('2.7.0+0.1784907685') is a final tiebreaker so that rebuilds
+    of the same version still order deterministically.
+    """
+    main, _, build = version.lstrip("v").partition("+")
+    core, _, pre = main.partition("-")
     nums = tuple((list(map(int, re.findall(r"\d+", core))) + [0, 0, 0])[:3])
-    if not pre:
-        return (nums, 1, ())
-    return (nums, 0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")))
+    return (nums, 0 if pre else 1, _ident_key(pre), _ident_key(build))
 
 
 def in_semver_range(version, rng):
@@ -114,10 +122,10 @@ def in_semver_range(version, rng):
         ">": lambda a, b: a > b, "<": lambda a, b: a < b,
         "=": lambda a, b: a == b, "==": lambda a, b: a == b,
     }
-    v = semkey(version)
+    v = semkey(version)[:3]  # ranges ignore build metadata
     for alternative in rng.split("||"):
         comparators = re.findall(r"(>=|<=|==|>|<|=)?\s*v?(\d[^\s]*)", alternative)
-        if comparators and all(ops[op or "="](v, semkey(ver)) for op, ver in comparators):
+        if comparators and all(ops[op or "="](v, semkey(ver)[:3]) for op, ver in comparators):
             return True
     return False
 
@@ -298,19 +306,174 @@ def run_oc(*args):
     return json.loads(result.stdout)
 
 
-def get_cluster_info():
-    cv = run_oc("get", "clusterversion", "version")
+# kind -> (API group as must-gather names its directory, namespaced)
+KINDS = {
+    "clusterversions": ("config.openshift.io", False),
+    "clusteroperators": ("config.openshift.io", False),
+    "nodes": ("core", False),
+    "subscriptions": ("operators.coreos.com", True),
+    "clusterserviceversions": ("operators.coreos.com", True),
+    "installplans": ("operators.coreos.com", True),
+    "catalogsources": ("operators.coreos.com", True),
+}
+
+INSPECT_HINT = (
+    "oc adm inspect clusterversion/version clusteroperator/operator-lifecycle-manager --dest-dir=<dir> && "
+    "oc adm inspect subscriptions.operators.coreos.com,clusterserviceversions.operators.coreos.com,"
+    "installplans.operators.coreos.com,catalogsources.operators.coreos.com -A --dest-dir=<dir>"
+)
+
+
+class OcSource:
+    """Cluster objects from the cluster `oc` is logged in to."""
+
+    live = True
+    label = "live cluster (oc)"
+
+    def __init__(self):
+        self._csvs = None
+
+    def list(self, kind):
+        group, namespaced = KINDS[kind]
+        resource = kind if group == "core" else f"{kind}.{group}"
+        return run_oc("get", resource, *(["-A"] if namespaced else []))["items"]
+
+    def get(self, kind, name, namespace=None):
+        group, _ = KINDS[kind]
+        resource = kind if group == "core" else f"{kind}.{group}"
+        try:
+            return run_oc("get", resource, name, *(["-n", namespace] if namespace else []))
+        except RuntimeError:
+            return None
+
+    def csv(self, namespace, name):
+        if self._csvs is None:
+            self._csvs = {(x["metadata"]["namespace"], x["metadata"]["name"]): x
+                          for x in self.list("clusterserviceversions")}
+        return self._csvs.get((namespace, name))
+
+
+class MustGatherSource:
+    """The same objects read from a must-gather or `oc adm inspect` output.
+
+    Accepts the directory, a directory containing the per-image gather
+    directories, or a .tar / .tar.gz / .tgz of either.
+    """
+
+    live = False
+
+    def __init__(self, path):
+        try:
+            import yaml
+        except ImportError:
+            raise RuntimeError("Reading a must-gather needs PyYAML: pip install pyyaml")
+        self.yaml = yaml
+        self.loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+        path = Path(path).expanduser()
+        if not path.exists():
+            raise RuntimeError(f"{path} does not exist")
+        if path.is_file():
+            path = self._extract(path)
+        candidates = [path] + sorted(p for p in path.iterdir() if p.is_dir())
+        candidates += [q for p in candidates[1:] for q in sorted(p.iterdir()) if q.is_dir()]
+        self.roots = [d for d in candidates
+                      if (d / "namespaces").is_dir() or (d / "cluster-scoped-resources").is_dir()]
+        if not self.roots:
+            raise RuntimeError(f"No must-gather data (namespaces/ or cluster-scoped-resources/) under {path}")
+        self.label = f"must-gather {path.name}"
+        for d in [path] + self.roots:
+            ts = d / "timestamp"
+            if ts.is_file():
+                first = ts.read_text().strip().splitlines()[:1]
+                if first:
+                    self.label += f" (collected {first[0][:19]})"
+                break
+
+    @staticmethod
+    def _extract(archive):
+        import atexit
+        import shutil
+        import tarfile
+        import tempfile
+
+        dest = Path(tempfile.mkdtemp(prefix="ocp-upgrade-planner-mg-"))
+        atexit.register(shutil.rmtree, dest, ignore_errors=True)
+        log(f"Extracting {archive.name}...")
+        with tarfile.open(archive) as tar:
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(dest, filter="data")
+            else:
+                safe = [m for m in tar.getmembers()
+                        if (m.isfile() or m.isdir()) and not m.name.startswith("/") and ".." not in Path(m.name).parts]
+                tar.extractall(dest, members=safe)
+        # Name the source after the archive, not the temp directory.
+        top = [p for p in dest.iterdir() if p.is_dir()]
+        return top[0] if len(top) == 1 else dest
+
+    def _load(self, f):
+        try:
+            with open(f) as fh:
+                doc = self.yaml.load(fh, Loader=self.loader)
+        except (OSError, self.yaml.YAMLError):
+            return []
+        if not isinstance(doc, dict):
+            return []
+        return (doc.get("items") or []) if "items" in doc else [doc]
+
+    def _files(self, kind, namespace="*", name="*"):
+        group, namespaced = KINDS[kind]
+        base = f"namespaces/{namespace}/{group}" if namespaced else f"cluster-scoped-resources/{group}"
+        for root in self.roots:
+            yield from root.glob(f"{base}/{kind}/{name}.yaml")
+            if name == "*":
+                yield from root.glob(f"{base}/{kind}.yaml")
+
+    def list(self, kind):
+        seen, out = set(), []
+        for f in self._files(kind):
+            for obj in self._load(f):
+                meta = obj.get("metadata", {})
+                key = (meta.get("namespace"), meta.get("name"))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(obj)
+        return out
+
+    def get(self, kind, name, namespace=None):
+        for f in self._files(kind, namespace or "*", name):
+            for obj in self._load(f):
+                if obj.get("metadata", {}).get("name") == name:
+                    return obj
+        # Some gathers store a whole list in one <kind>.yaml file instead.
+        group, namespaced = KINDS[kind]
+        base = f"namespaces/{namespace or '*'}/{group}" if namespaced else f"cluster-scoped-resources/{group}"
+        for root in self.roots:
+            for f in root.glob(f"{base}/{kind}.yaml"):
+                for obj in self._load(f):
+                    meta = obj.get("metadata", {})
+                    if meta.get("name") == name and (namespace is None or meta.get("namespace") == namespace):
+                        return obj
+        return None
+
+    def csv(self, namespace, name):
+        # Load just the one CSV: AllNamespaces operators have a copy in every namespace.
+        return self.get("clusterserviceversions", name, namespace) if name else None
+
+
+def get_cluster_info(src):
+    cv = src.get("clusterversions", "version")
+    if not cv:
+        raise RuntimeError("ClusterVersion 'version' not found.")
     version = cv["status"]["desired"]["version"]
     channel = cv["spec"].get("channel", "")
     # desired.architecture is only set ("Multi") for multi-arch payloads.
-    arch = cv["status"].get("desired", {}).get("architecture", "").lower()
+    arch = (cv["status"].get("desired", {}).get("architecture") or "").lower()
     if not arch:
-        arch = "amd64"
         try:
-            nodes = run_oc("get", "nodes")
-            arch = nodes["items"][0]["status"]["nodeInfo"]["architecture"]
+            arch = src.list("nodes")[0]["status"]["nodeInfo"]["architecture"]
         except (RuntimeError, IndexError, KeyError):
-            pass
+            arch = "amd64"
+            log("Architecture not found; assuming amd64 (override with --arch).")
     conditions = {x["type"]: x for x in cv["status"].get("conditions", [])}
     return {"version": version, "channel": channel, "arch": arch, "conditions": conditions}
 
@@ -329,11 +492,11 @@ def parse_max_ocp(csv):
     return None
 
 
-def get_installed_operators():
+def get_installed_operators(src):
     """Return one entry per Subscription, enriched with its installed CSV."""
-    subs = run_oc("get", "subscriptions.operators.coreos.com", "-A")["items"]
-    csvs = run_oc("get", "csv", "-A")["items"]
-    csv_index = {(x["metadata"]["namespace"], x["metadata"]["name"]): x for x in csvs}
+    subs = src.list("subscriptions")
+    if not subs and not src.live:
+        log("Warning: no Subscriptions in the must-gather. Collect them with:\n  " + INSPECT_HINT)
 
     operators = []
     for sub in subs:
@@ -341,7 +504,7 @@ def get_installed_operators():
         spec = sub.get("spec", {})
         status = sub.get("status", {})
         installed = status.get("installedCSV") or ""
-        csv = csv_index.get((ns, installed))
+        csv = src.csv(ns, installed)
         operators.append(
             {
                 "namespace": ns,
@@ -353,7 +516,7 @@ def get_installed_operators():
                 "installed_csv": installed,
                 "display_name": csv["spec"].get("displayName", "") if csv else "",
                 "version": csv["spec"].get("version", "") if csv else "",
-                "csv_phase": csv["status"].get("phase", "") if csv else "",
+                "csv_phase": csv.get("status", {}).get("phase", "") if csv else "",
                 "max_ocp": parse_max_ocp(csv) if csv else None,
                 "simulated": False,
             }
@@ -383,10 +546,10 @@ def simulated_operator(spec, source):
     }
 
 
-def get_catalog_orgs():
+def get_catalog_orgs(src):
     """Map (namespace, CatalogSource name) -> Ecosystem Catalog organization."""
     try:
-        items = run_oc("get", "catalogsources.operators.coreos.com", "-A")["items"]
+        items = src.list("catalogsources")
     except RuntimeError:
         return {}
     orgs = {}
@@ -399,7 +562,7 @@ def get_catalog_orgs():
 
 
 def get_catalog_channels(op):
-    """Channels for this package in the cluster's own catalog (PackageManifest)."""
+    """Channels for this package in the cluster's own catalog (PackageManifest; live only)."""
     try:
         data = run_oc(
             "get", "packagemanifests", "-n", op["source_namespace"],
@@ -420,20 +583,19 @@ def get_catalog_channels(op):
     }
 
 
-def get_olm_upgradeable():
-    try:
-        co = run_oc("get", "clusteroperator", "operator-lifecycle-manager")
-    except RuntimeError:
+def get_olm_upgradeable(src):
+    co = src.get("clusteroperators", "operator-lifecycle-manager")
+    if not co:
         return None
-    for cond in co["status"].get("conditions", []):
+    for cond in co.get("status", {}).get("conditions", []):
         if cond["type"] == "Upgradeable":
             return cond
     return None
 
 
-def get_pending_installplans():
+def get_pending_installplans(src):
     try:
-        ips = run_oc("get", "installplans.operators.coreos.com", "-A")["items"]
+        ips = src.list("installplans")
     except RuntimeError:
         return []
     pending, seen = [], set()
@@ -1218,7 +1380,8 @@ def build_report(cluster, current, ocp, hops, results, olm_cond, pending_ips, wh
 
     return {
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "cluster": {"version": cluster["version"], "channel": cluster["channel"], "arch": cluster["arch"]},
+        "cluster": {"version": cluster["version"], "channel": cluster["channel"], "arch": cluster["arch"],
+                    "source": cluster.get("source", "")},
         "current": current,
         "current_minor": current_minor,
         "target": ocp["target"],
@@ -1290,6 +1453,7 @@ def print_text(rep):
     print(f"  Current version : {c(rep['current'], CYAN)}" + (c("  (--from override)", YELLOW) if rep["what_if"] else ""))
     print(f"  Target version  : {c(rep['target'], CYAN)}")
     print(f"  Cluster channel : {rep['cluster']['channel'] or '(none)'}   arch: {rep['cluster']['arch']}")
+    print(f"  Cluster data    : {rep['cluster']['source']}")
     print(f"  Report date     : {rep['generated']}")
     print(hr)
 
@@ -1557,7 +1721,7 @@ def render_html(rep):
     a("<div class='meta'>")
     for k, v in (("Current version", rep["current"] + (" (what-if)" if rep["what_if"] else "")),
                  ("Target version", rep["target"]), ("Cluster channel", rep["cluster"]["channel"] or "(none)"),
-                 ("Architecture", rep["cluster"]["arch"])):
+                 ("Architecture", rep["cluster"]["arch"]), ("Cluster data", rep["cluster"]["source"])):
         a(f"<div><b>{e(k)}</b>{e(v)}</div>")
     a("</div>")
 
@@ -1684,6 +1848,9 @@ def main():
         description="Plan an OpenShift upgrade: OCP update path plus exact operator versions per stage."
     )
     parser.add_argument("--target", "-t", required=True, help="Target OCP version, e.g. 4.22.15 or 4.22 (latest z)")
+    parser.add_argument("--must-gather", metavar="PATH",
+                        help="Read cluster data from a must-gather (or oc adm inspect) directory or tarball "
+                             "instead of the live cluster")
     parser.add_argument("--from", dest="from_version", help="Override the current OCP version (what-if planning)")
     parser.add_argument("--arch", help="Override architecture for the update graph (default: from cluster)")
     parser.add_argument("--allow-conditional", action="store_true",
@@ -1712,15 +1879,18 @@ def main():
         parser.error("--target must look like 4.22 or 4.22.15")
 
     try:
-        log("Reading cluster version and operators...")
-        cluster = get_cluster_info()
-        operators = [] if args.only_simulated else get_installed_operators()
-        olm_cond = get_olm_upgradeable()
-        pending_ips = [] if args.only_simulated else get_pending_installplans()
+        src = MustGatherSource(args.must_gather) if args.must_gather else OcSource()
+        log(f"Reading cluster version and operators from {src.label}...")
+        cluster = get_cluster_info(src)
+        operators = [] if args.only_simulated else get_installed_operators(src)
+        olm_cond = get_olm_upgradeable(src)
+        pending_ips = [] if args.only_simulated else get_pending_installplans(src)
     except Exception as ex:
         print(c(f"Error: {ex}", RED), file=sys.stderr)
-        print("Make sure 'oc' is installed and you are logged in.", file=sys.stderr)
+        if not args.must_gather:
+            print("Make sure 'oc' is installed and you are logged in, or use --must-gather.", file=sys.stderr)
         sys.exit(1)
+    cluster["source"] = src.label
     try:
         operators += [simulated_operator(s, args.simulate_source) for s in args.simulate_operator]
     except ValueError as ex:
@@ -1742,14 +1912,14 @@ def main():
     products = fetch_lifecycle_products(args.refresh_cache)
     catalogs, catalog_orgs = {}, {}
     if not args.lifecycle_only:
-        catalog_orgs = get_catalog_orgs()
+        catalog_orgs = get_catalog_orgs(src)
         for op in operators:
             if op["simulated"] and op["source"] in INDEX_ORGS.values():
                 catalog_orgs.setdefault((op["source_namespace"], op["source"]), op["source"])
         catalogs = fetch_catalogs(operators, minors, catalog_orgs, args.refresh_cache)
     log(f"Analyzing {len(operators)} operators...")
     results = analyze(operators, products, hops, minor_of(current), minor_of(ocp["target"]),
-                      not args.no_catalog, catalogs, catalog_orgs, minors, args.prefer_latest)
+                      not args.no_catalog and src.live, catalogs, catalog_orgs, minors, args.prefer_latest)
     rep = build_report(cluster, current, ocp, hops, results, olm_cond, pending_ips,
                        bool(args.from_version), minors)
 

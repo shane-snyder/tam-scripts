@@ -1,6 +1,6 @@
 # OpenShift Upgrade Planner
 
-Plans an OpenShift upgrade with a focus on operators. It reads the cluster version and installed operators from the cluster you're logged into. For a target OCP version, it tells you **which exact operator versions to install, in which channel, and when**: before or after each OCP update.
+Plans an OpenShift upgrade with a focus on operators. It reads the cluster version and installed operators from the cluster you're logged into, or from a **must-gather**. For a target OCP version, it tells you **which exact operator versions to install, in which channel, and when**: before or after each OCP update.
 
 ## What it reports
 
@@ -32,7 +32,7 @@ Plans an OpenShift upgrade with a focus on operators. It reads the cluster versi
 
 ## Prerequisites
 
-- `oc` CLI logged in to the cluster (read access to ClusterVersion, Subscriptions, CSVs, InstallPlans, CatalogSources, PackageManifests and ClusterOperators)
+- Either `oc` logged in to the cluster (read access to ClusterVersion, Subscriptions, CSVs, InstallPlans, CatalogSources, PackageManifests and ClusterOperators), or a must-gather (see [Running from a must-gather](#running-from-a-must-gather))
 - Python 3.8+
 - Internet access to `api.openshift.com`, `access.redhat.com` and `catalog.redhat.com`. No Red Hat login or registry credentials are needed.
 
@@ -42,7 +42,7 @@ Plans an OpenShift upgrade with a focus on operators. It reads the cluster versi
 cd operator_versions
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt    # requests, plus pyyaml for --must-gather
 ```
 
 ## Usage
@@ -53,6 +53,9 @@ python ocp_upgrade_planner.py --target 4.22 --html plan.html
 
 # Plan to a specific release
 python ocp_upgrade_planner.py --target 4.22.18
+
+# Plan from a must-gather instead of a live cluster (directory or .tar.gz)
+python ocp_upgrade_planner.py --target 4.22 --must-gather ~/cases/must-gather.tar.gz --html plan.html
 
 # Required operator moves go straight to the newest supported version (fewer later moves)
 python ocp_upgrade_planner.py --target 4.22 --prefer-latest
@@ -77,6 +80,27 @@ python ocp_upgrade_planner.py --target 4.22 --no-color > plan.txt
 #   --no-catalog       skip per-operator PackageManifest lookups on the cluster
 #   --refresh-cache    ignore cached API data (cache: ~/.cache/ocp-upgrade-planner, 24h)
 ```
+
+## Running from a must-gather
+
+Pass `--must-gather` with a must-gather directory, the `must-gather.local.<id>` folder, or the `.tar`/`.tar.gz` a customer uploaded. No cluster access or `oc` login is needed. The planner reads the same objects it would read live:
+
+- ClusterVersion and the `operator-lifecycle-manager` ClusterOperator
+- Subscriptions, ClusterServiceVersions, InstallPlans and CatalogSources
+- Nodes, for the architecture
+
+A must-gather can't answer "is a newer version available in my channel right now", because PackageManifests are only queried on a live cluster. Everything else works, and the header shows when the must-gather was collected.
+
+If the must-gather is missing the OLM objects, the planner warns and prints a collection command. A full must-gather can also refuse to run when the node it lands on is over 70% disk (`Disk usage exceeds the volume percentage`). In both cases you can collect just what the planner needs with `oc adm inspect`. This runs from your workstation and creates no pods on the cluster:
+
+```bash
+oc adm inspect clusterversion/version clusteroperator/operator-lifecycle-manager --dest-dir=planner-data
+oc adm inspect subscriptions.operators.coreos.com,clusterserviceversions.operators.coreos.com,\
+installplans.operators.coreos.com,catalogsources.operators.coreos.com -A --dest-dir=planner-data
+python ocp_upgrade_planner.py --target 4.22 --must-gather planner-data
+```
+
+The output is the same layout as a must-gather, so it also works when a customer collects it and sends it to you. Add `--arch` if nodes weren't collected and the cluster isn't amd64.
 
 ## How it works
 
